@@ -111,7 +111,11 @@ else
 fi
 
 # Upload arm64 asset (clobber if present)
-gh release upload "$TAG" "$APK_PATH#$ASSET_NAME" --repo isa-kit/play --clobber
+# gh's "path#label" only sets a display label; the asset FILENAME stays the
+# source name. Copy to a temp file with the wanted name so the URL is stable.
+cp "$APK_PATH" "/tmp/${ASSET_NAME}"
+gh release upload "$TAG" "/tmp/${ASSET_NAME}" --repo isa-kit/play --clobber
+rm -f "/tmp/${ASSET_NAME}"
 
 # Alias asset: delete then re-upload (gh has no rename for a differently-named local file)
 gh release delete-asset "$TAG" "$ALIAS_NAME" --repo isa-kit/play -y 2>/dev/null || true
