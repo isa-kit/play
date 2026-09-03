@@ -1,1 +1,15 @@
-[]
+[
+  {
+    "id": "landsmith",
+    "version": "v0.1.0",
+    "date": "2026-09-03",
+    "apk": {
+      "url": "https://github.com/isa-kit/play/releases/download/landsmith-v0.1.0/landsmith-v0.1.0-arm64.apk",
+      "size": "14.9 MB",
+      "sha256": "676fb157110f92f9caecd2cb83023a15a369a3f63dd9c64dc0345b72265e4eba",
+      "preview": true
+    },
+    "name": "landsmith",
+    "tagline": ""
+  }
+]
