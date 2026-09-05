@@ -1,30 +1,50 @@
 #!/usr/bin/env bash
-# publish-game.sh <id> <web-bundle-dir> <apk-path> [--version v] [--notes file] [--dry-run]
+# publish-game.sh <id> <web-bundle-dir> [<apk-path>] [--version v] [--notes file] [--dry-run] [--web-only]
 #
 # Copies a game's web bundle into <id>/, creates/updates a GitHub release on
 # isa-kit/play tagged <id>-<version> with the APK plus a <id>-latest.apk
 # alias asset, writes size + sha256 into games.json, commits and pushes.
 #
+# The site is mounted at MOUNT_PATH on the live domain (currently
+# https://devisant.com/play/, carried there by isan's deploy from this repo's
+# tree). If the Games applet is ever renamed, this is a one-line switch:
+# change MOUNT_PATH below (e.g. to "/games/") — nothing else in this script
+# depends on the mount point, since games.json/index.html use relative paths.
+#
+# --web-only: skip the GitHub release entirely (no APK arg needed) and just
+# refresh <id>/ + games.json off the web bundle. Use when the APK already on
+# the release is unchanged and only the web build needs a refresh.
+#
 # bash 3.2 compatible (macOS default bash). No mapfile, no ${var,,}.
 set -euo pipefail
+
+MOUNT_PATH="/play/"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 usage() {
-  echo "usage: $0 <id> <web-bundle-dir> <apk-path> [--version v] [--notes file] [--dry-run]" >&2
+  echo "usage: $0 <id> <web-bundle-dir> [<apk-path>] [--version v] [--notes file] [--dry-run] [--web-only]" >&2
   exit 1
 }
 
-[ $# -ge 3 ] || usage
+[ $# -ge 2 ] || usage
 
 GAME_ID="$1"; shift
 WEB_DIR="$1"; shift
-APK_PATH="$1"; shift
 
 VERSION=""
 NOTES_FILE=""
 DRY_RUN=0
+WEB_ONLY=0
+APK_PATH=""
+
+if [ $# -gt 0 ]; then
+  case "$1" in
+    --version|--notes|--dry-run|--web-only) ;;
+    *) APK_PATH="$1"; shift ;;
+  esac
+fi
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -34,6 +54,8 @@ while [ $# -gt 0 ]; do
       NOTES_FILE="$2"; shift 2 ;;
     --dry-run)
       DRY_RUN=1; shift ;;
+    --web-only)
+      WEB_ONLY=1; shift ;;
     *)
       echo "unknown arg: $1" >&2; usage ;;
   esac
@@ -51,9 +73,15 @@ if [ ! -d "$WEB_DIR" ]; then
   echo "error: web bundle dir not found: $WEB_DIR" >&2
   exit 1
 fi
-if [ ! -f "$APK_PATH" ]; then
-  echo "error: apk not found: $APK_PATH" >&2
-  exit 1
+if [ "$WEB_ONLY" -eq 0 ]; then
+  if [ -z "$APK_PATH" ]; then
+    echo "error: <apk-path> is required unless --web-only" >&2
+    exit 1
+  fi
+  if [ ! -f "$APK_PATH" ]; then
+    echo "error: apk not found: $APK_PATH" >&2
+    exit 1
+  fi
 fi
 if [ -z "$VERSION" ]; then
   echo "error: --version is required" >&2
@@ -64,27 +92,34 @@ TAG="${GAME_ID}-${VERSION}"
 ASSET_NAME="${GAME_ID}-${VERSION}-arm64.apk"
 ALIAS_NAME="${GAME_ID}-latest.apk"
 
-APK_SIZE_BYTES=$(stat -f%z "$APK_PATH" 2>/dev/null || stat -c%s "$APK_PATH")
-APK_SHA256=$(shasum -a 256 "$APK_PATH" | awk '{print $1}')
+if [ "$WEB_ONLY" -eq 0 ]; then
+  APK_SIZE_BYTES=$(stat -f%z "$APK_PATH" 2>/dev/null || stat -c%s "$APK_PATH")
+  APK_SHA256=$(shasum -a 256 "$APK_PATH" | awk '{print $1}')
 
-# Human-readable size (MB, one decimal)
-APK_SIZE_HUMAN=$(python3 - "$APK_SIZE_BYTES" <<'PY'
+  # Human-readable size (MB, one decimal)
+  APK_SIZE_HUMAN=$(python3 - "$APK_SIZE_BYTES" <<'PY'
 import sys
 b = int(sys.argv[1])
 mb = b / (1024 * 1024)
 print(f"{mb:.1f} MB")
 PY
 )
+fi
 
 DATE_STR=$(date +%Y-%m-%d)
 
 echo "== publish-game.sh =="
 echo "id:        $GAME_ID"
 echo "web dir:   $WEB_DIR"
-echo "apk:       $APK_PATH ($APK_SIZE_HUMAN, sha256=$APK_SHA256)"
-echo "tag:       $TAG"
-echo "asset:     $ASSET_NAME"
-echo "alias:     $ALIAS_NAME"
+echo "mount:     $MOUNT_PATH"
+if [ "$WEB_ONLY" -eq 0 ]; then
+  echo "apk:       $APK_PATH ($APK_SIZE_HUMAN, sha256=$APK_SHA256)"
+  echo "tag:       $TAG"
+  echo "asset:     $ASSET_NAME"
+  echo "alias:     $ALIAS_NAME"
+else
+  echo "web-only:  skipping release/APK upload"
+fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "-- dry run: no changes made --"
@@ -96,41 +131,45 @@ rm -rf "${REPO_ROOT:?}/${GAME_ID}"
 mkdir -p "$REPO_ROOT/$GAME_ID"
 cp -R "$WEB_DIR"/. "$REPO_ROOT/$GAME_ID/"
 
-# 2. Create or update the GitHub release
-RELEASE_ARGS=(--title "$GAME_ID $VERSION")
-if [ -n "$NOTES_FILE" ] && [ -f "$NOTES_FILE" ]; then
-  RELEASE_ARGS+=(--notes-file "$NOTES_FILE")
-else
-  RELEASE_ARGS+=(--notes "$GAME_ID $VERSION")
+if [ "$WEB_ONLY" -eq 0 ]; then
+  # 2. Create or update the GitHub release
+  RELEASE_ARGS=(--title "$GAME_ID $VERSION")
+  if [ -n "$NOTES_FILE" ] && [ -f "$NOTES_FILE" ]; then
+    RELEASE_ARGS+=(--notes-file "$NOTES_FILE")
+  else
+    RELEASE_ARGS+=(--notes "$GAME_ID $VERSION")
+  fi
+
+  if gh release view "$TAG" --repo isa-kit/play >/dev/null 2>&1; then
+    echo "release $TAG exists, updating"
+  else
+    gh release create "$TAG" --repo isa-kit/play "${RELEASE_ARGS[@]}"
+  fi
+
+  # Upload arm64 asset (clobber if present)
+  # gh's "path#label" only sets a display label; the asset FILENAME stays the
+  # source name. Copy to a temp file with the wanted name so the URL is stable.
+  cp "$APK_PATH" "/tmp/${ASSET_NAME}"
+  gh release upload "$TAG" "/tmp/${ASSET_NAME}" --repo isa-kit/play --clobber
+  rm -f "/tmp/${ASSET_NAME}"
+
+  # Alias asset: delete then re-upload (gh has no rename for a differently-named local file)
+  gh release delete-asset "$TAG" "$ALIAS_NAME" --repo isa-kit/play -y 2>/dev/null || true
+  cp "$APK_PATH" "/tmp/${ALIAS_NAME}"
+  gh release upload "$TAG" "/tmp/${ALIAS_NAME}" --repo isa-kit/play --clobber
+  rm -f "/tmp/${ALIAS_NAME}"
+
+  ASSET_URL="https://github.com/isa-kit/play/releases/download/${TAG}/${ASSET_NAME}"
+  ALIAS_URL="https://github.com/isa-kit/play/releases/download/${TAG}/${ALIAS_NAME}"
 fi
 
-if gh release view "$TAG" --repo isa-kit/play >/dev/null 2>&1; then
-  echo "release $TAG exists, updating"
-else
-  gh release create "$TAG" --repo isa-kit/play "${RELEASE_ARGS[@]}"
-fi
-
-# Upload arm64 asset (clobber if present)
-# gh's "path#label" only sets a display label; the asset FILENAME stays the
-# source name. Copy to a temp file with the wanted name so the URL is stable.
-cp "$APK_PATH" "/tmp/${ASSET_NAME}"
-gh release upload "$TAG" "/tmp/${ASSET_NAME}" --repo isa-kit/play --clobber
-rm -f "/tmp/${ASSET_NAME}"
-
-# Alias asset: delete then re-upload (gh has no rename for a differently-named local file)
-gh release delete-asset "$TAG" "$ALIAS_NAME" --repo isa-kit/play -y 2>/dev/null || true
-cp "$APK_PATH" "/tmp/${ALIAS_NAME}"
-gh release upload "$TAG" "/tmp/${ALIAS_NAME}" --repo isa-kit/play --clobber
-rm -f "/tmp/${ALIAS_NAME}"
-
-ASSET_URL="https://github.com/isa-kit/play/releases/download/${TAG}/${ASSET_NAME}"
-ALIAS_URL="https://github.com/isa-kit/play/releases/download/${TAG}/${ALIAS_NAME}"
-
-# 3. Update games.json (python3, preserves other entries)
-python3 - "$REPO_ROOT/games.json" "$GAME_ID" "$VERSION" "$DATE_STR" "$ASSET_URL" "$APK_SIZE_HUMAN" "$APK_SHA256" <<'PY'
+# 3. Update games.json (python3, preserves other entries; --web-only leaves
+# the existing apk block untouched and only refreshes version/date)
+python3 - "$REPO_ROOT/games.json" "$GAME_ID" "$VERSION" "$DATE_STR" "$WEB_ONLY" "${ASSET_URL:-}" "${APK_SIZE_HUMAN:-}" "${APK_SHA256:-}" <<'PY'
 import json, sys, os
 
-path, game_id, version, date_str, apk_url, apk_size, apk_sha = sys.argv[1:8]
+path, game_id, version, date_str, web_only, apk_url, apk_size, apk_sha = sys.argv[1:9]
+web_only = web_only == "1"
 
 if os.path.exists(path):
     with open(path) as f:
@@ -151,12 +190,13 @@ if entry is None:
 
 entry["version"] = version
 entry["date"] = date_str
-entry["apk"] = {
-    "url": apk_url,
-    "size": apk_size,
-    "sha256": apk_sha,
-    "preview": entry.get("apk", {}).get("preview", True),
-}
+if not web_only:
+    entry["apk"] = {
+        "url": apk_url,
+        "size": apk_size,
+        "sha256": apk_sha,
+        "preview": entry.get("apk", {}).get("preview", True),
+    }
 entry.setdefault("name", game_id)
 entry.setdefault("tagline", "")
 
@@ -167,11 +207,17 @@ PY
 
 # 4. Commit and push (scoped add)
 git add "$GAME_ID" games.json
-git commit -m "Publish ${GAME_ID} ${VERSION}"
+if [ "$WEB_ONLY" -eq 1 ]; then
+  git commit -m "Publish ${GAME_ID} ${VERSION} (web-only refresh)"
+else
+  git commit -m "Publish ${GAME_ID} ${VERSION}"
+fi
 git push origin main
 
 echo ""
 echo "== done =="
-echo "web:       https://play.devisant.com/${GAME_ID}/"
-echo "apk:       $ASSET_URL"
-echo "apk alias: $ALIAS_URL"
+echo "web:       https://devisant.com${MOUNT_PATH}${GAME_ID}/"
+if [ "$WEB_ONLY" -eq 0 ]; then
+  echo "apk:       $ASSET_URL"
+  echo "apk alias: $ALIAS_URL"
+fi
